@@ -32,11 +32,11 @@ const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
     email: { type: String, required: true, unique: true },
-    password: { type: String, required: true }, // Note: In production, we will hash this!
+    password: { type: String, required: true }, 
     accountID: String,
     totalBalance: { type: Number, default: 0 },
     invested: { type: Number, default: 0 },
-    earnings: { type: Number, default: 0 },
+    earnings: { type: Number, default: 0 }, // Lifetime profits
     available: { type: Number, default: 0 },
     isVerified: { type: Boolean, default: false },
     isAdmin: { type: Boolean, default: false },
@@ -44,7 +44,7 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Transaction Schema
+// Transaction Schema (For Deposits & Withdrawals)
 const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     type: { type: String, enum: ['Deposit', 'Withdrawal'], required: true },
@@ -56,13 +56,13 @@ const transactionSchema = new mongoose.Schema({
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Investment Schema
+// Investment Schema (For Active Plans)
 const investmentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     planName: { type: String, required: true },
     amount: { type: Number, required: true },
-    dailyROI: { type: Number, required: true },
-    durationDays: { type: Number, required: true },
+    dailyROI: { type: Number, required: true }, // Treated as Total Target ROI %
+    durationDays: { type: Number, required: true }, // Can be fractions (e.g., 0.25 for 6 hours)
     accruedProfit: { type: Number, default: 0 },
     status: { type: String, enum: ['Active', 'Completed', 'Cancelled'], default: 'Active' },
     startedAt: { type: Date, default: Date.now },
@@ -80,7 +80,7 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const { firstName, lastName, email, password } = req.body;
         
-        // FIX: Force email to lowercase and remove accidental spaces
+        // Force email to lowercase and remove spaces
         const normalizedEmail = email.toLowerCase().trim();
         
         const existingUser = await User.findOne({ email: normalizedEmail });
@@ -106,11 +106,8 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        
-        // FIX: Force email to lowercase to match registration exactly
         const normalizedEmail = email.toLowerCase().trim();
         
-        // Find user where both email AND password match
         const user = await User.findOne({ email: normalizedEmail, password: password });
         
         if (!user) return res.status(401).json({ error: 'Invalid email or password' });
@@ -123,12 +120,46 @@ app.post('/api/auth/login', async (req, res) => {
 
 
 // ==========================================
-// 5. USER DASHBOARD ROUTES
+// 5. USER DASHBOARD ROUTES (WITH AUTO-SYNC)
 // ==========================================
 app.get('/api/user/:id', async (req, res) => {
     try {
-        const user = await User.findById(req.params.id);
+        let user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // --- AUTO-MATURITY ENGINE ---
+        // Checks if any active investments have finished their duration
+        const activeInvestments = await Investment.find({ userId: user._id, status: 'Active' });
+        let hasChanges = false;
+        let totalNewProfit = 0;
+        let totalFreedCapital = 0;
+
+        const now = new Date();
+
+        for (let plan of activeInvestments) {
+            if (now >= plan.maturesAt) {
+                // Plan is finished! Calculate profit.
+                const profit = plan.amount * (plan.dailyROI / 100);
+                
+                plan.status = 'Completed';
+                plan.accruedProfit = profit;
+                await plan.save();
+
+                totalFreedCapital += plan.amount;
+                totalNewProfit += profit;
+                hasChanges = true;
+            }
+        }
+
+        // If plans matured, update the user's main wallet balances
+        if (hasChanges) {
+            user.invested -= totalFreedCapital;
+            user.available += (totalFreedCapital + totalNewProfit);
+            user.earnings += totalNewProfit;
+            user.totalBalance = user.available + user.invested; 
+            await user.save();
+        }
+
         res.json(user);
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
@@ -203,12 +234,14 @@ app.post('/api/invest', async (req, res) => {
 
         if (user.available < amount) return res.status(400).json({ error: 'Insufficient available funds to invest' });
 
+        // Update balances
         user.available -= amount;
         user.invested += amount;
         await user.save();
 
+        // Calculate exact maturity date (supports fractional days like 0.25 for 6 hours)
         const maturesAt = new Date();
-        maturesAt.setDate(maturesAt.getDate() + durationDays);
+        maturesAt.setTime(maturesAt.getTime() + (durationDays * 24 * 60 * 60 * 1000));
 
         const investment = await Investment.create({
             userId, planName, amount, dailyROI, durationDays, maturesAt
@@ -225,7 +258,6 @@ app.post('/api/invest', async (req, res) => {
 // 8. ADMIN ROUTES
 // ==========================================
 
-// TEMPORARY BACKDOOR: Visit this URL in your browser to make an account an Admin
 app.get('/api/make-admin/:email', async (req, res) => {
     try {
         const userEmail = req.params.email.toLowerCase().trim();
@@ -241,7 +273,6 @@ app.get('/api/make-admin/:email', async (req, res) => {
     }
 });
 
-// Get all pending transactions
 app.get('/api/admin/transactions/pending', async (req, res) => {
     try {
         const transactions = await Transaction.find({ status: 'Pending' }).populate('userId', 'firstName lastName email');
@@ -251,7 +282,6 @@ app.get('/api/admin/transactions/pending', async (req, res) => {
     }
 });
 
-// Approve or Reject a Transaction
 app.put('/api/admin/transaction/:id', async (req, res) => {
     try {
         const { action } = req.body; 
@@ -285,7 +315,6 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
     }
 });
 
-// Get all users
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -295,7 +324,6 @@ app.get('/api/admin/users', async (req, res) => {
     }
 });
 
-// Edit User Balances (God Mode)
 app.put('/api/admin/user/:id/balance', async (req, res) => {
     try {
         const { available, invested, earnings, totalBalance } = req.body;
@@ -313,13 +341,11 @@ app.put('/api/admin/user/:id/balance', async (req, res) => {
     }
 });
 
-// Delete User (God Mode)
 app.delete('/api/admin/user/:id', async (req, res) => {
     try {
         const user = await User.findByIdAndDelete(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
         
-        // Clean up their orphaned data
         await Transaction.deleteMany({ userId: req.params.id });
         await Investment.deleteMany({ userId: req.params.id });
         
