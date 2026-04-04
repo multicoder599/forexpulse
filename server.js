@@ -8,11 +8,8 @@ const app = express();
 // ==========================================
 // 1. MIDDLEWARE & CONFIGURATION
 // ==========================================
-// Allow requests from your local environment AND your live Render URL
-app.use(cors({
-    origin: ['http://localhost:5000', 'https://forexpulse-9rlp.onrender.com'],
-    credentials: true
-}));
+// Allow requests from ANY origin to prevent "Load failed" errors while testing
+app.use(cors());
 app.use(express.json()); 
 
 // Serve static frontend files from the 'public' folder
@@ -116,7 +113,7 @@ app.post('/api/auth/login', async (req, res) => {
 // 5. USER DASHBOARD ROUTES
 // ==========================================
 
-// Get logged-in user data (Using an ID passed in the request for now)
+// Get logged-in user data
 app.get('/api/user/:id', async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
@@ -157,7 +154,6 @@ app.post('/api/wallet/deposit', async (req, res) => {
     try {
         const { userId, amount, method, phoneOrAddress } = req.body;
         
-        // Creates a "Pending" transaction. Admin must approve it to add funds.
         const transaction = await Transaction.create({
             userId,
             type: 'Deposit',
@@ -180,12 +176,10 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Check if user has enough available balance
         if (user.available < amount) {
             return res.status(400).json({ error: 'Insufficient available funds' });
         }
 
-        // Deduct from available immediately to prevent double-spending, create pending tx
         user.available -= amount;
         user.totalBalance -= amount;
         await user.save();
@@ -221,12 +215,10 @@ app.post('/api/invest', async (req, res) => {
             return res.status(400).json({ error: 'Insufficient available funds to invest' });
         }
 
-        // Move money from Available to Invested
         user.available -= amount;
         user.invested += amount;
         await user.save();
 
-        // Calculate maturity date
         const maturesAt = new Date();
         maturesAt.setDate(maturesAt.getDate() + durationDays);
 
@@ -250,10 +242,30 @@ app.post('/api/invest', async (req, res) => {
 // 8. ADMIN ROUTES
 // ==========================================
 
-// Get all pending transactions (Deposits & Withdrawals)
+// TEMPORARY BACKDOOR: Visit this URL in your browser to make an account an Admin
+// Example: https://forexpulse-9rlp.onrender.com/api/make-admin/your-email@example.com
+app.get('/api/make-admin/:email', async (req, res) => {
+    try {
+        const userEmail = req.params.email;
+        const user = await User.findOneAndUpdate(
+            { email: userEmail }, 
+            { isAdmin: true }, 
+            { new: true } 
+        );
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found. Register them first!" });
+        }
+
+        res.json({ message: `Success! ${user.email} is now an Admin.`, user });
+    } catch (err) {
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// Get all pending transactions
 app.get('/api/admin/transactions/pending', async (req, res) => {
     try {
-        // In a real app, check if req.user.isAdmin === true here
         const transactions = await Transaction.find({ status: 'Pending' }).populate('userId', 'firstName lastName email');
         res.json(transactions);
     } catch (err) {
@@ -264,7 +276,7 @@ app.get('/api/admin/transactions/pending', async (req, res) => {
 // Approve or Reject a Transaction
 app.put('/api/admin/transaction/:id', async (req, res) => {
     try {
-        const { action } = req.body; // 'Approve' or 'Reject'
+        const { action } = req.body; 
         const transaction = await Transaction.findById(req.params.id);
         
         if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
@@ -275,17 +287,14 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
         if (action === 'Approve') {
             transaction.status = 'Completed';
             
-            // If it's a deposit, add the money to the user's available balance
             if (transaction.type === 'Deposit') {
                 user.available += transaction.amount;
                 user.totalBalance += transaction.amount;
                 await user.save();
             }
-            // If it's a withdrawal, the money was already deducted when requested, so we just approve the tx.
         } else if (action === 'Reject') {
             transaction.status = 'Rejected';
             
-            // If rejecting a withdrawal, refund the money back to available balance
             if (transaction.type === 'Withdrawal') {
                 user.available += transaction.amount;
                 user.totalBalance += transaction.amount;
@@ -303,7 +312,7 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
 // Get all users
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const users = await User.find().select('-password'); // Exclude passwords
+        const users = await User.find().select('-password');
         res.json(users);
     } catch (err) {
         res.status(500).json({ error: 'Server error fetching users' });
