@@ -44,19 +44,19 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Transaction Schema (For Deposits & Withdrawals)
+// Transaction Schema
 const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     type: { type: String, enum: ['Deposit', 'Withdrawal'], required: true },
     amount: { type: Number, required: true },
-    method: { type: String, required: true }, // e.g., 'M-Pesa', 'Crypto', 'Bank'
-    destination: String, // e.g., M-Pesa number or Crypto address
+    method: { type: String, required: true }, 
+    destination: String, 
     status: { type: String, enum: ['Pending', 'Completed', 'Rejected'], default: 'Pending' },
     createdAt: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Investment Schema (For Active Plans)
+// Investment Schema
 const investmentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     planName: { type: String, required: true },
@@ -80,14 +80,22 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const { firstName, lastName, email, password } = req.body;
         
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
+        // FIX: Force email to lowercase and remove accidental spaces
+        const normalizedEmail = email.toLowerCase().trim();
+        
+        const existingUser = await User.findOne({ email: normalizedEmail });
         if (existingUser) return res.status(400).json({ error: 'Email already in use' });
 
-        // Create new user (Generate a random 8-digit Account ID)
         const accountID = Math.floor(10000000 + Math.random() * 90000000).toString();
         
-        const user = await User.create({ firstName, lastName, email, password, accountID });
+        const user = await User.create({ 
+            firstName, 
+            lastName, 
+            email: normalizedEmail, 
+            password, 
+            accountID 
+        });
+        
         res.status(201).json({ message: 'User registered successfully', user });
     } catch (err) {
         res.status(500).json({ error: 'Server error during registration' });
@@ -98,7 +106,12 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        const user = await User.findOne({ email, password });
+        
+        // FIX: Force email to lowercase to match registration exactly
+        const normalizedEmail = email.toLowerCase().trim();
+        
+        // Find user where both email AND password match
+        const user = await User.findOne({ email: normalizedEmail, password: password });
         
         if (!user) return res.status(401).json({ error: 'Invalid email or password' });
         
@@ -112,8 +125,6 @@ app.post('/api/auth/login', async (req, res) => {
 // ==========================================
 // 5. USER DASHBOARD ROUTES
 // ==========================================
-
-// Get logged-in user data
 app.get('/api/user/:id', async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
@@ -124,7 +135,6 @@ app.get('/api/user/:id', async (req, res) => {
     }
 });
 
-// Get user's active investments
 app.get('/api/user/:id/investments', async (req, res) => {
     try {
         const investments = await Investment.find({ userId: req.params.id, status: 'Active' });
@@ -134,7 +144,6 @@ app.get('/api/user/:id/investments', async (req, res) => {
     }
 });
 
-// Get user's transaction history
 app.get('/api/user/:id/transactions', async (req, res) => {
     try {
         const transactions = await Transaction.find({ userId: req.params.id }).sort({ createdAt: -1 });
@@ -148,48 +157,32 @@ app.get('/api/user/:id/transactions', async (req, res) => {
 // ==========================================
 // 6. WALLET ROUTES (DEPOSIT / WITHDRAW)
 // ==========================================
-
-// Request a Deposit
 app.post('/api/wallet/deposit', async (req, res) => {
     try {
         const { userId, amount, method, phoneOrAddress } = req.body;
-        
         const transaction = await Transaction.create({
-            userId,
-            type: 'Deposit',
-            amount,
-            method,
-            destination: phoneOrAddress
+            userId, type: 'Deposit', amount, method, destination: phoneOrAddress
         });
-        
         res.json({ message: 'Deposit request submitted. Pending verification.', transaction });
     } catch (err) {
         res.status(500).json({ error: 'Server error processing deposit' });
     }
 });
 
-// Request a Withdrawal
 app.post('/api/wallet/withdraw', async (req, res) => {
     try {
         const { userId, amount, method, destination } = req.body;
-        
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        if (user.available < amount) {
-            return res.status(400).json({ error: 'Insufficient available funds' });
-        }
+        if (user.available < amount) return res.status(400).json({ error: 'Insufficient available funds' });
 
         user.available -= amount;
         user.totalBalance -= amount;
         await user.save();
 
         const transaction = await Transaction.create({
-            userId,
-            type: 'Withdrawal',
-            amount,
-            method,
-            destination
+            userId, type: 'Withdrawal', amount, method, destination
         });
 
         res.json({ message: 'Withdrawal request submitted successfully.', transaction });
@@ -202,18 +195,13 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 // ==========================================
 // 7. INVESTMENT ROUTES
 // ==========================================
-
-// Start a new investment plan
 app.post('/api/invest', async (req, res) => {
     try {
         const { userId, planName, amount, dailyROI, durationDays } = req.body;
-
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        if (user.available < amount) {
-            return res.status(400).json({ error: 'Insufficient available funds to invest' });
-        }
+        if (user.available < amount) return res.status(400).json({ error: 'Insufficient available funds to invest' });
 
         user.available -= amount;
         user.invested += amount;
@@ -223,12 +211,7 @@ app.post('/api/invest', async (req, res) => {
         maturesAt.setDate(maturesAt.getDate() + durationDays);
 
         const investment = await Investment.create({
-            userId,
-            planName,
-            amount,
-            dailyROI,
-            durationDays,
-            maturesAt
+            userId, planName, amount, dailyROI, durationDays, maturesAt
         });
 
         res.json({ message: `Successfully invested into ${planName}`, investment });
@@ -243,20 +226,15 @@ app.post('/api/invest', async (req, res) => {
 // ==========================================
 
 // TEMPORARY BACKDOOR: Visit this URL in your browser to make an account an Admin
-// Example: https://forexpulse-9rlp.onrender.com/api/make-admin/your-email@example.com
 app.get('/api/make-admin/:email', async (req, res) => {
     try {
-        const userEmail = req.params.email;
+        const userEmail = req.params.email.toLowerCase().trim();
         const user = await User.findOneAndUpdate(
             { email: userEmail }, 
             { isAdmin: true }, 
             { new: true } 
         );
-
-        if (!user) {
-            return res.status(404).json({ message: "User not found. Register them first!" });
-        }
-
+        if (!user) return res.status(404).json({ message: "User not found. Register them first!" });
         res.json({ message: `Success! ${user.email} is now an Admin.`, user });
     } catch (err) {
         res.status(500).json({ error: "Server error" });
@@ -286,18 +264,16 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
 
         if (action === 'Approve') {
             transaction.status = 'Completed';
-            
             if (transaction.type === 'Deposit') {
-                user.available += transaction.amount;
-                user.totalBalance += transaction.amount;
+                user.available += Number(transaction.amount);
+                user.totalBalance += Number(transaction.amount);
                 await user.save();
             }
         } else if (action === 'Reject') {
             transaction.status = 'Rejected';
-            
             if (transaction.type === 'Withdrawal') {
-                user.available += transaction.amount;
-                user.totalBalance += transaction.amount;
+                user.available += Number(transaction.amount);
+                user.totalBalance += Number(transaction.amount);
                 await user.save();
             }
         }
@@ -312,10 +288,44 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
 // Get all users
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const users = await User.find().select('-password');
+        const users = await User.find().select('-password').sort({ createdAt: -1 });
         res.json(users);
     } catch (err) {
         res.status(500).json({ error: 'Server error fetching users' });
+    }
+});
+
+// Edit User Balances (God Mode)
+app.put('/api/admin/user/:id/balance', async (req, res) => {
+    try {
+        const { available, invested, earnings, totalBalance } = req.body;
+        const user = await User.findByIdAndUpdate(req.params.id, {
+            available: Number(available),
+            invested: Number(invested),
+            earnings: Number(earnings),
+            totalBalance: Number(totalBalance)
+        }, { new: true });
+        
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json({ message: 'Balances updated successfully', user });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error updating balances' });
+    }
+});
+
+// Delete User (God Mode)
+app.delete('/api/admin/user/:id', async (req, res) => {
+    try {
+        const user = await User.findByIdAndDelete(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        
+        // Clean up their orphaned data
+        await Transaction.deleteMany({ userId: req.params.id });
+        await Investment.deleteMany({ userId: req.params.id });
+        
+        res.json({ message: 'User and associated data deleted permanently.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error deleting user' });
     }
 });
 
