@@ -8,8 +8,11 @@ const app = express();
 // ==========================================
 // 1. MIDDLEWARE & CONFIGURATION
 // ==========================================
+// Allow requests from ANY origin to prevent "Load failed" errors while testing
 app.use(cors());
 app.use(express.json()); 
+
+// Serve static frontend files from the 'public' folder
 app.use(express.static('public'));
 
 // ==========================================
@@ -29,11 +32,11 @@ const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
     email: { type: String, required: true, unique: true },
-    password: { type: String, required: true }, 
+    password: { type: String, required: true }, // Note: In production, we will hash this!
     accountID: String,
     totalBalance: { type: Number, default: 0 },
     invested: { type: Number, default: 0 },
-    earnings: { type: Number, default: 0 },
+    earnings: { type: Number, default: 0 }, // Lifetime profits
     available: { type: Number, default: 0 },
     isVerified: { type: Boolean, default: false },
     isAdmin: { type: Boolean, default: false },
@@ -58,8 +61,8 @@ const investmentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     planName: { type: String, required: true },
     amount: { type: Number, required: true },
-    dailyROI: { type: Number, required: true }, 
-    durationDays: { type: Number, required: true }, 
+    dailyROI: { type: Number, required: true }, // Treated as Total Target ROI %
+    durationDays: { type: Number, required: true }, // Can be fractions (e.g., 0.25 for 6 hours)
     accruedProfit: { type: Number, default: 0 },
     status: { type: String, enum: ['Active', 'Completed', 'Cancelled'], default: 'Active' },
     startedAt: { type: Date, default: Date.now },
@@ -67,7 +70,7 @@ const investmentSchema = new mongoose.Schema({
 });
 const Investment = mongoose.model('Investment', investmentSchema);
 
-// NEW: Notification Schema
+// Notification Schema
 const notificationSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
@@ -83,6 +86,7 @@ const Notification = mongoose.model('Notification', notificationSchema);
 // 4. AUTHENTICATION ROUTES
 // ==========================================
 
+// Register a new user
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { firstName, lastName, email, password } = req.body;
@@ -111,6 +115,7 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
+// Login a user
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -313,7 +318,7 @@ app.get('/api/make-admin/:email', async (req, res) => {
     try {
         const userEmail = req.params.email.toLowerCase().trim();
         const user = await User.findOneAndUpdate({ email: userEmail }, { isAdmin: true }, { new: true });
-        if (!user) return res.status(404).json({ message: "User not found." });
+        if (!user) return res.status(404).json({ message: "User not found. Register them first!" });
         res.json({ message: `Success! ${user.email} is now an Admin.`, user });
     } catch (err) {
         res.status(500).json({ error: "Server error" });
@@ -325,7 +330,7 @@ app.get('/api/admin/transactions/pending', async (req, res) => {
         const transactions = await Transaction.find({ status: 'Pending' }).populate('userId', 'firstName lastName email');
         res.json(transactions);
     } catch (err) {
-        res.status(500).json({ error: 'Server error' });
+        res.status(500).json({ error: 'Server error fetching admin data' });
     }
 });
 
