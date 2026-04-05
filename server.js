@@ -29,6 +29,9 @@ const userSchema = new mongoose.Schema({
     lastName: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
+    phone: { type: String, default: '' }, // New Field
+    currency: { type: String, default: 'USD' }, // New Field
+    timezone: { type: String, default: 'UTC' }, // New Field
     accountID: String,
     totalBalance: { type: Number, default: 0 },
     invested: { type: Number, default: 0 },
@@ -121,7 +124,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 
 // ==========================================
-// 5. USER DASHBOARD & NOTIFICATIONS
+// 5. USER DASHBOARD & SETTINGS
 // ==========================================
 app.get('/api/user/:id', async (req, res) => {
     try {
@@ -170,6 +173,59 @@ app.get('/api/user/:id', async (req, res) => {
     }
 });
 
+// ✅ NEW: Update Profile Info
+app.put('/api/user/:id/profile', async (req, res) => {
+    try {
+        const { firstName, lastName, phone } = req.body;
+        const user = await User.findByIdAndUpdate(
+            req.params.id, 
+            { firstName, lastName, phone }, 
+            { new: true }
+        ).select('-password');
+        
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json(user);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error updating profile' });
+    }
+});
+
+// ✅ NEW: Update Password
+app.put('/api/user/:id/password', async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        const user = await User.findById(req.params.id);
+        
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.password !== currentPassword) {
+            return res.status(400).json({ error: 'Incorrect current password' });
+        }
+
+        user.password = newPassword;
+        await user.save();
+        res.json({ message: 'Password updated successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error updating password' });
+    }
+});
+
+// ✅ NEW: Update Preferences
+app.put('/api/user/:id/preferences', async (req, res) => {
+    try {
+        const { currency, timezone } = req.body;
+        const user = await User.findByIdAndUpdate(
+            req.params.id, 
+            { currency, timezone }, 
+            { new: true }
+        ).select('-password');
+        
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json(user);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error updating preferences' });
+    }
+});
+
 app.get('/api/user/:id/investments', async (req, res) => {
     try {
         const investments = await Investment.find({ userId: req.params.id, status: 'Active' });
@@ -210,8 +266,6 @@ app.put('/api/user/:id/notifications/read', async (req, res) => {
 // ==========================================
 // 6. WALLET ROUTES (AUTO-DEPOSIT & WITHDRAW)
 // ==========================================
-
-// ✅ UPDATED: STK Deposits are now Auto-Completed
 app.post('/api/wallet/deposit', async (req, res) => {
     try {
         const { userId, amount, method, phoneOrAddress } = req.body;
@@ -219,17 +273,14 @@ app.post('/api/wallet/deposit', async (req, res) => {
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Auto-approve the deposit directly (Acting as STK Success Webhook)
         const transaction = await Transaction.create({
             userId, type: 'Deposit', amount, method, destination: phoneOrAddress, status: 'Completed'
         });
 
-        // Instantly credit user
         user.available += Number(amount);
         user.totalBalance += Number(amount);
         await user.save();
 
-        // Trigger Success Notification instantly
         await Notification.create({
             userId,
             title: 'Deposit Successful',
@@ -250,7 +301,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.available < amount) return res.status(400).json({ error: 'Insufficient available funds' });
 
-        // Deduct balance immediately while pending
         user.available -= amount;
         user.totalBalance -= amount;
         await user.save();
@@ -322,7 +372,6 @@ app.get('/api/make-admin/:email', async (req, res) => {
     }
 });
 
-// ✅ NEW: Fetch all transactions for history log
 app.get('/api/admin/transactions/all', async (req, res) => {
     try {
         const transactions = await Transaction.find()
@@ -334,7 +383,6 @@ app.get('/api/admin/transactions/all', async (req, res) => {
     }
 });
 
-// Fetch pending transactions (Now exclusively used for withdrawals by frontend)
 app.get('/api/admin/transactions/pending', async (req, res) => {
     try {
         const transactions = await Transaction.find({ status: 'Pending' })
@@ -346,7 +394,6 @@ app.get('/api/admin/transactions/pending', async (req, res) => {
     }
 });
 
-// ✅ UPDATED: Withdrawal Approval + Telegram Integration
 app.put('/api/admin/transaction/:id', async (req, res) => {
     try {
         const { action } = req.body; 
@@ -360,8 +407,6 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
         if (action === 'Approve') {
             transaction.status = 'Completed';
             
-            // Note: Since deposits are auto-approved, this admin route should theoretically 
-            // only process Withdrawals now. But if you process a pending deposit manually:
             if (transaction.type === 'Deposit') {
                 user.available += Number(transaction.amount);
                 user.totalBalance += Number(transaction.amount);
@@ -375,12 +420,10 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
                 type: transaction.type.toLowerCase() === 'deposit' ? 'deposit' : 'withdraw'
             });
 
-            // 🚀 TELEGRAM INTEGRATION (Only trigger on Approved Withdrawals)
             if (transaction.type === 'Withdrawal' && process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
                 const tgMessage = `✅ *Withdrawal Approved*\n\n👤 *User:* ${user.firstName} ${user.lastName}\n✉️ *Email:* ${user.email}\n💰 *Amount:* KES ${transaction.amount.toLocaleString()}\n🏦 *Method:* ${transaction.method}\n📍 *Destination:* \`${transaction.destination}\``;
                 
                 try {
-                    // Node 18+ native fetch
                     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -398,7 +441,6 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
         } else if (action === 'Reject') {
             transaction.status = 'Rejected';
             
-            // If we reject a withdrawal, we must refund the user's available balance
             if (transaction.type === 'Withdrawal') {
                 user.available += Number(transaction.amount);
                 user.totalBalance += Number(transaction.amount);
