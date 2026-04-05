@@ -8,11 +8,8 @@ const app = express();
 // ==========================================
 // 1. MIDDLEWARE & CONFIGURATION
 // ==========================================
-// Allow requests from ANY origin to prevent "Load failed" errors while testing
 app.use(cors());
 app.use(express.json()); 
-
-// Serve static frontend files from the 'public' folder
 app.use(express.static('public'));
 
 // ==========================================
@@ -27,16 +24,15 @@ mongoose.connect(process.env.MONGO_URI)
 // 3. DATABASE MODELS (SCHEMAS)
 // ==========================================
 
-// User Schema
 const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
     email: { type: String, required: true, unique: true },
-    password: { type: String, required: true }, // Note: In production, we will hash this!
+    password: { type: String, required: true }, 
     accountID: String,
     totalBalance: { type: Number, default: 0 },
     invested: { type: Number, default: 0 },
-    earnings: { type: Number, default: 0 }, // Lifetime profits
+    earnings: { type: Number, default: 0 },
     available: { type: Number, default: 0 },
     isVerified: { type: Boolean, default: false },
     isAdmin: { type: Boolean, default: false },
@@ -44,7 +40,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Transaction Schema
 const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     type: { type: String, enum: ['Deposit', 'Withdrawal'], required: true },
@@ -56,13 +51,12 @@ const transactionSchema = new mongoose.Schema({
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Investment Schema
 const investmentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     planName: { type: String, required: true },
     amount: { type: Number, required: true },
-    dailyROI: { type: Number, required: true }, // Treated as Total Target ROI %
-    durationDays: { type: Number, required: true }, // Can be fractions (e.g., 0.25 for 6 hours)
+    dailyROI: { type: Number, required: true }, 
+    durationDays: { type: Number, required: true }, 
     accruedProfit: { type: Number, default: 0 },
     status: { type: String, enum: ['Active', 'Completed', 'Cancelled'], default: 'Active' },
     startedAt: { type: Date, default: Date.now },
@@ -70,12 +64,11 @@ const investmentSchema = new mongoose.Schema({
 });
 const Investment = mongoose.model('Investment', investmentSchema);
 
-// Notification Schema
 const notificationSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
     message: { type: String, required: true },
-    type: { type: String, default: 'general' }, // e.g., 'deposit', 'withdraw', 'invest', 'general'
+    type: { type: String, default: 'general' }, 
     isRead: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 });
@@ -85,8 +78,6 @@ const Notification = mongoose.model('Notification', notificationSchema);
 // ==========================================
 // 4. AUTHENTICATION ROUTES
 // ==========================================
-
-// Register a new user
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { firstName, lastName, email, password } = req.body;
@@ -101,7 +92,6 @@ app.post('/api/auth/register', async (req, res) => {
             firstName, lastName, email: normalizedEmail, password, accountID 
         });
 
-        // Trigger Welcome Notification
         await Notification.create({
             userId: user._id,
             title: 'Welcome to ForexPulse',
@@ -115,7 +105,6 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// Login a user
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -132,14 +121,14 @@ app.post('/api/auth/login', async (req, res) => {
 
 
 // ==========================================
-// 5. USER DASHBOARD & NOTIFICATION ROUTES
+// 5. USER DASHBOARD & NOTIFICATIONS
 // ==========================================
 app.get('/api/user/:id', async (req, res) => {
     try {
         let user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // --- AUTO-MATURITY ENGINE ---
+        // Auto-Maturity Engine
         const activeInvestments = await Investment.find({ userId: user._id, status: 'Active' });
         let hasChanges = false;
         let totalNewProfit = 0;
@@ -158,7 +147,6 @@ app.get('/api/user/:id', async (req, res) => {
                 totalNewProfit += profit;
                 hasChanges = true;
 
-                // Trigger Plan Maturity Notification
                 await Notification.create({
                     userId: user._id,
                     title: 'Trade Matured',
@@ -200,7 +188,6 @@ app.get('/api/user/:id/transactions', async (req, res) => {
     }
 });
 
-// GET user notifications
 app.get('/api/user/:id/notifications', async (req, res) => {
     try {
         const notifs = await Notification.find({ userId: req.params.id }).sort({ createdAt: -1 }).limit(30);
@@ -210,7 +197,6 @@ app.get('/api/user/:id/notifications', async (req, res) => {
     }
 });
 
-// MARK notifications as read
 app.put('/api/user/:id/notifications/read', async (req, res) => {
     try {
         await Notification.updateMany({ userId: req.params.id, isRead: false }, { isRead: true });
@@ -222,26 +208,38 @@ app.put('/api/user/:id/notifications/read', async (req, res) => {
 
 
 // ==========================================
-// 6. WALLET ROUTES (DEPOSIT / WITHDRAW)
+// 6. WALLET ROUTES (AUTO-DEPOSIT & WITHDRAW)
 // ==========================================
+
+// ✅ UPDATED: STK Deposits are now Auto-Completed
 app.post('/api/wallet/deposit', async (req, res) => {
     try {
         const { userId, amount, method, phoneOrAddress } = req.body;
+        
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Auto-approve the deposit directly (Acting as STK Success Webhook)
         const transaction = await Transaction.create({
-            userId, type: 'Deposit', amount, method, destination: phoneOrAddress
+            userId, type: 'Deposit', amount, method, destination: phoneOrAddress, status: 'Completed'
         });
 
-        // Trigger Notification
+        // Instantly credit user
+        user.available += Number(amount);
+        user.totalBalance += Number(amount);
+        await user.save();
+
+        // Trigger Success Notification instantly
         await Notification.create({
             userId,
-            title: 'Deposit Requested',
-            message: `Your deposit request for KES ${amount.toLocaleString()} via ${method} is pending review.`,
+            title: 'Deposit Successful',
+            message: `Your deposit of KES ${amount.toLocaleString()} via ${method} has been credited to your wallet.`,
             type: 'deposit'
         });
 
-        res.json({ message: 'Deposit request submitted.', transaction });
+        res.json({ message: 'Deposit successful.', transaction });
     } catch (err) {
-        res.status(500).json({ error: 'Server error processing deposit' });
+        res.status(500).json({ error: 'Server error processing STK deposit' });
     }
 });
 
@@ -252,15 +250,15 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found' });
         if (user.available < amount) return res.status(400).json({ error: 'Insufficient available funds' });
 
+        // Deduct balance immediately while pending
         user.available -= amount;
         user.totalBalance -= amount;
         await user.save();
 
         const transaction = await Transaction.create({
-            userId, type: 'Withdrawal', amount, method, destination
+            userId, type: 'Withdrawal', amount, method, destination, status: 'Pending'
         });
 
-        // Trigger Notification
         await Notification.create({
             userId,
             title: 'Withdrawal Requested',
@@ -296,7 +294,6 @@ app.post('/api/invest', async (req, res) => {
             userId, planName, amount, dailyROI, durationDays, maturesAt
         });
 
-        // Trigger Notification
         await Notification.create({
             userId,
             title: 'Capital Staked',
@@ -325,15 +322,31 @@ app.get('/api/make-admin/:email', async (req, res) => {
     }
 });
 
-app.get('/api/admin/transactions/pending', async (req, res) => {
+// ✅ NEW: Fetch all transactions for history log
+app.get('/api/admin/transactions/all', async (req, res) => {
     try {
-        const transactions = await Transaction.find({ status: 'Pending' }).populate('userId', 'firstName lastName email');
+        const transactions = await Transaction.find()
+            .populate('userId', 'firstName lastName email')
+            .sort({ createdAt: -1 });
         res.json(transactions);
     } catch (err) {
-        res.status(500).json({ error: 'Server error fetching admin data' });
+        res.status(500).json({ error: 'Server error fetching all transactions' });
     }
 });
 
+// Fetch pending transactions (Now exclusively used for withdrawals by frontend)
+app.get('/api/admin/transactions/pending', async (req, res) => {
+    try {
+        const transactions = await Transaction.find({ status: 'Pending' })
+            .populate('userId', 'firstName lastName email')
+            .sort({ createdAt: 1 });
+        res.json(transactions);
+    } catch (err) {
+        res.status(500).json({ error: 'Server error fetching pending data' });
+    }
+});
+
+// ✅ UPDATED: Withdrawal Approval + Telegram Integration
 app.put('/api/admin/transaction/:id', async (req, res) => {
     try {
         const { action } = req.body; 
@@ -346,13 +359,15 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
 
         if (action === 'Approve') {
             transaction.status = 'Completed';
+            
+            // Note: Since deposits are auto-approved, this admin route should theoretically 
+            // only process Withdrawals now. But if you process a pending deposit manually:
             if (transaction.type === 'Deposit') {
                 user.available += Number(transaction.amount);
                 user.totalBalance += Number(transaction.amount);
                 await user.save();
             }
-            
-            // Notify User of Approval
+
             await Notification.create({
                 userId: user._id,
                 title: `${transaction.type} Approved`,
@@ -360,19 +375,40 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
                 type: transaction.type.toLowerCase() === 'deposit' ? 'deposit' : 'withdraw'
             });
 
+            // 🚀 TELEGRAM INTEGRATION (Only trigger on Approved Withdrawals)
+            if (transaction.type === 'Withdrawal' && process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+                const tgMessage = `✅ *Withdrawal Approved*\n\n👤 *User:* ${user.firstName} ${user.lastName}\n✉️ *Email:* ${user.email}\n💰 *Amount:* KES ${transaction.amount.toLocaleString()}\n🏦 *Method:* ${transaction.method}\n📍 *Destination:* \`${transaction.destination}\``;
+                
+                try {
+                    // Node 18+ native fetch
+                    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: process.env.TELEGRAM_CHAT_ID,
+                            text: tgMessage,
+                            parse_mode: 'Markdown'
+                        })
+                    });
+                } catch (tgError) {
+                    console.error("Failed to send Telegram notification:", tgError);
+                }
+            }
+
         } else if (action === 'Reject') {
             transaction.status = 'Rejected';
+            
+            // If we reject a withdrawal, we must refund the user's available balance
             if (transaction.type === 'Withdrawal') {
                 user.available += Number(transaction.amount);
                 user.totalBalance += Number(transaction.amount);
                 await user.save();
             }
             
-            // Notify User of Rejection
             await Notification.create({
                 userId: user._id,
                 title: `${transaction.type} Rejected`,
-                message: `Your ${transaction.type.toLowerCase()} of KES ${transaction.amount.toLocaleString()} was declined.`,
+                message: `Your ${transaction.type.toLowerCase()} of KES ${transaction.amount.toLocaleString()} was declined. Funds have been returned to your wallet.`,
                 type: 'general'
             });
         }
