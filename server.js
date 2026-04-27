@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const axios = require('axios'); // Added for MegaPay & Telegram requests
 require('dotenv').config();
 
 const app = express();
@@ -11,6 +12,20 @@ const app = express();
 app.use(cors());
 app.use(express.json()); 
 app.use(express.static('public'));
+
+// Telegram Helper Function for Webhook & Admin Alerts
+const sendTelegramMessage = async (message) => {
+    if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) return;
+    try {
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID,
+            text: message,
+            parse_mode: 'HTML'
+        });
+    } catch (err) { 
+        console.error('Telegram Notification Error:', err.message); 
+    }
+};
 
 // ==========================================
 // 2. DATABASE CONNECTION
@@ -29,9 +44,9 @@ const userSchema = new mongoose.Schema({
     lastName: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
-    phone: { type: String, default: '' }, // New Field
-    currency: { type: String, default: 'USD' }, // New Field
-    timezone: { type: String, default: 'UTC' }, // New Field
+    phone: { type: String, default: '' }, 
+    currency: { type: String, default: 'USD' }, 
+    timezone: { type: String, default: 'UTC' }, 
     accountID: String,
     totalBalance: { type: Number, default: 0 },
     invested: { type: Number, default: 0 },
@@ -45,6 +60,7 @@ const User = mongoose.model('User', userSchema);
 
 const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    refId: { type: String }, // Added to track MegaPay References/Receipts
     type: { type: String, enum: ['Deposit', 'Withdrawal'], required: true },
     amount: { type: Number, required: true },
     method: { type: String, required: true }, 
@@ -97,7 +113,7 @@ app.post('/api/auth/register', async (req, res) => {
 
         await Notification.create({
             userId: user._id,
-            title: 'Welcome to ForexPulse',
+            title: 'Welcome to ChainTrade',
             message: 'Your account has been created successfully. You can now fund your wallet.',
             type: 'general'
         });
@@ -173,7 +189,6 @@ app.get('/api/user/:id', async (req, res) => {
     }
 });
 
-// ✅ NEW: Update Profile Info
 app.put('/api/user/:id/profile', async (req, res) => {
     try {
         const { firstName, lastName, phone } = req.body;
@@ -190,7 +205,6 @@ app.put('/api/user/:id/profile', async (req, res) => {
     }
 });
 
-// ✅ NEW: Update Password
 app.put('/api/user/:id/password', async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
@@ -209,7 +223,6 @@ app.put('/api/user/:id/password', async (req, res) => {
     }
 });
 
-// ✅ NEW: Update Preferences
 app.put('/api/user/:id/preferences', async (req, res) => {
     try {
         const { currency, timezone } = req.body;
@@ -264,35 +277,157 @@ app.put('/api/user/:id/notifications/read', async (req, res) => {
 
 
 // ==========================================
-// 6. WALLET ROUTES (AUTO-DEPOSIT & WITHDRAW)
+// 6. WALLET ROUTES (MEGAPAY DEPOSIT & WITHDRAW)
 // ==========================================
+
+// ✅ MEGAPAY DEPOSIT API
 app.post('/api/wallet/deposit', async (req, res) => {
     try {
-        const { userId, amount, method, phoneOrAddress } = req.body;
-        
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        // Accommodate both frontend field names and direct API tests
+        const amount = parseFloat(req.body.amount);
+        const rawPhone = req.body.phoneOrAddress || req.body.userPhone;
+        const userId = req.body.userId;
+        const method = req.body.method || 'M-Pesa STK';
 
+        if (!rawPhone) return res.status(400).json({ error: 'Phone number is required.' });
+        if (isNaN(amount) || amount < 10) return res.status(400).json({ error: 'Minimum deposit is KES 10.' });
+
+        const user = await User.findById(userId) || await User.findOne({ phone: rawPhone });
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+
+        // Phone normalization (handles +254, 254, 07)
+        let formattedPhone = rawPhone.replace(/\D/g, '');
+        if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.slice(1);
+        else if (/^[71]/.test(formattedPhone)) formattedPhone = '254' + formattedPhone;
+        else if (!formattedPhone.startsWith('254')) formattedPhone = '254' + formattedPhone;
+
+        if (formattedPhone.length !== 12) {
+            return res.status(400).json({ error: 'Invalid phone number format. Use 07XXXXXXXX or 254XXXXXXXXX.' });
+        }
+
+        const reference = 'DEP' + Date.now();
+
+        const payload = {
+            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYDgkkstpA',
+            email:        process.env.MEGAPAY_EMAIL    || 'kanyingiwaitara@gmail.com',
+            amount:       amount,
+            msisdn:       formattedPhone,
+            callback_url: `${process.env.APP_URL || 'https://forexpulse-9rlp.onrender.com'}/api/megapay/webhook`,
+            description:  'ChainTrade Deposit',
+            reference:    reference
+        };
+
+        try {
+            const mpRes = await axios.post(
+                'https://megapay.co.ke/backend/v1/initiatestk',
+                payload,
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    timeout: 15000 
+                }
+            );
+
+            const mpData = mpRes.data;
+            if (mpData && (mpData.status === false || mpData.success === false || mpData.ResponseCode === '1')) {
+                return res.status(400).json({ error: mpData.errorMessage || mpData.message || 'MegaPay rejected the request.' });
+            }
+
+        } catch (mpErr) {
+            console.error('MegaPay STK error:', mpErr.message);
+            return res.status(502).json({ error: 'Payment gateway failed to send STK push.' });
+        }
+
+        // Record as Pending 
         const transaction = await Transaction.create({
-            userId, type: 'Deposit', amount, method, destination: phoneOrAddress, status: 'Completed'
+            userId: user._id,
+            refId: reference,
+            type: 'Deposit',
+            method: method,
+            amount: amount,
+            destination: formattedPhone,
+            status: 'Pending'
         });
 
-        user.available += Number(amount);
-        user.totalBalance += Number(amount);
-        await user.save();
-
-        await Notification.create({
-            userId,
-            title: 'Deposit Successful',
-            message: `Your deposit of KES ${amount.toLocaleString()} via ${method} has been credited to your wallet.`,
-            type: 'deposit'
+        res.status(200).json({
+            message: 'STK Push sent! Check your phone and enter your M-Pesa PIN.',
+            transactionId: transaction._id
         });
 
-        res.json({ message: 'Deposit successful.', transaction });
-    } catch (err) {
-        res.status(500).json({ error: 'Server error processing STK deposit' });
+    } catch (error) {
+        console.error('Deposit endpoint error:', error);
+        res.status(500).json({ error: 'Internal server error during deposit.' });
     }
 });
+
+// ✅ MEGAPAY WEBHOOK
+app.post('/api/megapay/webhook', async (req, res) => {
+    // MegaPay requires a fast 200 OK acknowledgment
+    res.status(200).send("OK");
+    
+    const data = req.body;
+    try {
+        if ((data.ResponseCode !== undefined ? data.ResponseCode : data.ResultCode) != 0) return;
+        
+        const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        const last9 = (data.Msisdn || data.phone || data.PhoneNumber || "").toString().replace(/\D/g, '').slice(-9);
+        
+        if (last9.length < 9) return;
+
+        // Find user by matching the end of the phone number
+        const user = await User.findOne({ 
+            $or: [
+                { phone: { $regex: new RegExp(last9 + '$') } },
+                { _id: (await Transaction.findOne({ destination: { $regex: new RegExp(last9 + '$') }, status: 'Pending' }))?.userId }
+            ]
+        });
+        
+        if (!user) return;
+
+        // Check if this receipt was already processed to prevent double-crediting
+        const existingTx = await Transaction.findOne({ refId: receipt });
+        if (existingTx && existingTx.status === 'Completed') return;
+
+        // Find the pending transaction and update it, or create a new one
+        let tx = await Transaction.findOne({ destination: { $regex: new RegExp(last9 + '$') }, status: 'Pending', amount: amount });
+        
+        if (tx) {
+            tx.status = 'Completed';
+            tx.refId = receipt;
+            await tx.save();
+        } else {
+            tx = await Transaction.create({ 
+                userId: user._id, 
+                refId: receipt, 
+                type: "Deposit", 
+                method: "M-Pesa", 
+                amount: amount, 
+                destination: data.Msisdn,
+                status: "Completed" 
+            });
+        }
+
+        // Credit User
+        user.available += amount;
+        user.totalBalance += amount;
+        await user.save();
+        
+        // Notify User
+        await Notification.create({ 
+            userId: user._id, 
+            title: "Deposit Successful", 
+            message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}`,
+            type: "deposit"
+        });
+        
+        // Alert Admin
+        sendTelegramMessage(`💵 <b>SUCCESSFUL DEPOSIT</b>\n👤 User: ${user.firstName} ${user.lastName}\n📱 Phone: ${user.phone || data.Msisdn}\n💰 Amount: KES ${amount}\n🧾 Ref: ${receipt}`);
+        
+    } catch (err) {
+        console.error("Webhook Processing Error:", err);
+    }
+});
+
 
 app.post('/api/wallet/withdraw', async (req, res) => {
     try {
@@ -420,22 +555,8 @@ app.put('/api/admin/transaction/:id', async (req, res) => {
                 type: transaction.type.toLowerCase() === 'deposit' ? 'deposit' : 'withdraw'
             });
 
-            if (transaction.type === 'Withdrawal' && process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
-                const tgMessage = `✅ *Withdrawal Approved*\n\n👤 *User:* ${user.firstName} ${user.lastName}\n✉️ *Email:* ${user.email}\n💰 *Amount:* KES ${transaction.amount.toLocaleString()}\n🏦 *Method:* ${transaction.method}\n📍 *Destination:* \`${transaction.destination}\``;
-                
-                try {
-                    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            chat_id: process.env.TELEGRAM_CHAT_ID,
-                            text: tgMessage,
-                            parse_mode: 'Markdown'
-                        })
-                    });
-                } catch (tgError) {
-                    console.error("Failed to send Telegram notification:", tgError);
-                }
+            if (transaction.type === 'Withdrawal') {
+                sendTelegramMessage(`✅ <b>WITHDRAWAL APPROVED</b>\n\n👤 User: ${user.firstName} ${user.lastName}\n✉️ Email: ${user.email}\n💰 Amount: KES ${transaction.amount.toLocaleString()}\n🏦 Method: ${transaction.method}\n📍 Destination: <code>${transaction.destination}</code>`);
             }
 
         } else if (action === 'Reject') {
